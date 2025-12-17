@@ -110,8 +110,13 @@ def register_tools(server: FastMCP) -> None:
         )
 
     @server.tool()
-    def get_job_status(job_id: str) -> Dict[str, Any]:
-        """Query detailed status of a specific PBS job."""
+    def get_job_status(job_id: str, history: bool = False) -> Dict[str, Any]:
+        """Query detailed status of a specific PBS job.
+
+        Args:
+            job_id: The ID of the job to check.
+            history: If True, search job history (finished jobs). Default is False (active jobs only).
+        """
 
         if not job_id:
             return _error_response(ValueError("job_id must be provided"))
@@ -120,7 +125,8 @@ def register_tools(server: FastMCP) -> None:
 
         try:
             with pbs_session(context) as client:
-                jobs = client.stat_jobs(job_id)
+                # Only extend="x" if history is requested
+                jobs = client.stat_jobs(job_id, extend="x" if history else None)
         except (PBSException, PBSMCPError, RuntimeError) as error:
             return _error_response(error)
 
@@ -137,17 +143,29 @@ def register_tools(server: FastMCP) -> None:
 
     @server.tool()
     def list_jobs(
+        job_id: str = "",
         state_filter: str = "all",
         user_filter: str = "",
         queue_filter: str = "",
     ) -> Dict[str, Any]:
-        """List PBS jobs with optional filtering."""
+        """List PBS jobs with optional filtering.
+
+        Args:
+            job_id: Optional specific job ID to list.
+            state_filter: Filter by job state (e.g. "R", "Q", "H", "F") or "all".
+            user_filter: Filter by job owner.
+            queue_filter: Filter by queue name.
+        """
 
         context = load_pbs_context()
 
         try:
             with pbs_session(context) as client:
-                jobs = client.stat_jobs()
+                # If job_id is provided, only stat that job
+                if job_id:
+                    jobs = client.stat_jobs(job_id)
+                else:
+                    jobs = client.stat_jobs()
         except (PBSException, PBSMCPError, RuntimeError) as error:
             return _error_response(error)
 

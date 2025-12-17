@@ -112,7 +112,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--server-args",
         nargs=argparse.REMAINDER,
-        default=["-m", "pbs_mcp.server"],
+        default=["-m", "pbs_mcp"],
         help="Arguments passed to the MCP server command.",
     )
     parser.add_argument(
@@ -305,12 +305,25 @@ async def run_conversation_loop(
     """Iteratively call OpenAI until there are no outstanding tool calls."""
 
     while True:
+        print(f"\n[DEBUG] Sending to LLM (History: {len(messages)} messages). Last message:")
+        if messages:
+            last_msg = messages[-1]
+            print(f"Role: {last_msg.get('role')}")
+            print(f"Content: {last_msg.get('content')}")
+
         response = client.chat.completions.create(
             model=model,
             messages=messages,
             tools=tools,
         )
         message = response.choices[0].message
+        print("\n[DEBUG] LLM Response:")
+        if message.content:
+            print(f"Content: {message.content}")
+        if message.tool_calls:
+            for tc in message.tool_calls:
+                print(f"Tool Call: {tc.function.name} args={tc.function.arguments}")
+
         assistant_entry: Dict[str, Any] = {"role": "assistant", "content": message.content or ""}
         if message.tool_calls:
             assistant_entry["tool_calls"] = message.tool_calls
