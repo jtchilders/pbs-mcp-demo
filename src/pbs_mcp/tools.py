@@ -212,7 +212,8 @@ def register_tools(server: FastMCP) -> None:
         context = load_pbs_context()
 
         try:
-            ensure_privilege(context, "administrator" if force else "operator")
+            if force:
+                ensure_privilege(context, "administrator")
             with pbs_session(context) as client:
                 client.delete_job(job_id, force=force)
         except (PBSPrivilegeError, PBSException, PBSMCPError, RuntimeError) as error:
@@ -230,7 +231,6 @@ def register_tools(server: FastMCP) -> None:
         context = load_pbs_context()
 
         try:
-            ensure_privilege(context, "operator")
             with pbs_session(context) as client:
                 client.hold_job(job_id)
         except (PBSPrivilegeError, PBSException, PBSMCPError, RuntimeError) as error:
@@ -248,7 +248,6 @@ def register_tools(server: FastMCP) -> None:
         context = load_pbs_context()
 
         try:
-            ensure_privilege(context, "operator")
             with pbs_session(context) as client:
                 client.release_job(job_id)
         except (PBSPrivilegeError, PBSException, PBSMCPError, RuntimeError) as error:

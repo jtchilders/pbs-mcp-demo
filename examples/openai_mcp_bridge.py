@@ -13,6 +13,7 @@ import argparse
 import asyncio
 import json
 import os
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -35,6 +36,7 @@ COMPLETED_STATES = {"F", "C", "E"}
 class JobTracker:
     job_id: Optional[str] = None
     state: Optional[str] = None
+    deleted: bool = False
     stdout_path: Optional[str] = None
     stderr_path: Optional[str] = None
     stdout_reported: bool = False
@@ -66,6 +68,10 @@ class JobTracker:
             return
         # Resources return text blobs; nothing to parse here yet.
 
+    def record_deletion(self, structured: Optional[Dict[str, Any]]) -> None:
+        if isinstance(structured, dict) and structured.get("success"):
+            self.deleted = True
+
     def record_local_read(self, path: str) -> None:
         norm = self._normalize_path(path)
         if self.stdout_path and norm == self.stdout_path:
@@ -75,6 +81,8 @@ class JobTracker:
 
     @property
     def job_completed(self) -> bool:
+        if self.deleted:
+            return True
         return (self.state or "").upper() in COMPLETED_STATES
 
     @staticmethod
@@ -119,6 +127,12 @@ def parse_args() -> argparse.Namespace:
         default=10,
         help="Maximum number of follow-up polling rounds before exiting.",
     )
+    parser.add_argument(
+        "--demo",
+        choices=["simple", "lifecycle", "admin", "resources"],
+        default="simple",
+        help="Select a pre-canned demo scenario.",
+    )
     return parser.parse_args()
 
 
@@ -157,6 +171,36 @@ def local_read_tool_schema() -> Dict[str, Any]:
         },
     }
 
+
+def list_resources_tool_schema() -> Dict[str, Any]:
+    return {
+        "type": "function",
+        "function": {
+            "name": "list_mcp_resources",
+            "description": "List all available resources on the MCP server.",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    }
+
+
+def read_resource_tool_schema() -> Dict[str, Any]:
+    return {
+        "type": "function",
+        "function": {
+            "name": "read_mcp_resource",
+            "description": "Read the content of a specific MCP resource.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "uri": {
+                        "type": "string",
+                        "description": "The URI of the resource to read (e.g., pbs://system/status).",
+                    }
+                },
+                "required": ["uri"],
+            },
+        },
+    }
 
 def read_local_file(arguments: str) -> Dict[str, Any]:
     """Read a text file so the LLM can inspect stdout/stderr contents."""
@@ -216,6 +260,39 @@ def _extract_structured_from_payload(payload: Dict[str, Any]) -> Optional[Dict[s
                 return data
     return None
 
+    return None
+
+
+async def list_mcp_resources(session: ClientSession) -> Dict[str, Any]:
+    """List available resources."""
+    try:
+        resources = await session.list_resources()
+        return {
+            "resources": [
+                {"name": r.name, "uri": str(r.uri), "description": r.description}
+                for r in resources.resources
+            ]
+        }
+    except Exception as exc:
+        return {"error": str(exc)}
+
+
+async def read_mcp_resource(session: ClientSession, arguments: str) -> Dict[str, Any]:
+    """Read a specific resource."""
+    try:
+        parsed_args = json.loads(arguments or "{}")
+        uri = parsed_args.get("uri")
+        if not uri:
+            return {"error": "uri parameter is required"}
+        
+        result = await session.read_resource(uri)
+        # Combine contents directly
+        contents = []
+        for content in result.contents:
+            contents.append({"uri": str(content.uri), "text": content.text})
+        return {"contents": contents}
+    except Exception as exc:
+        return {"error": str(exc)}
 
 async def run_conversation_loop(
     client: OpenAI,
@@ -246,10 +323,15 @@ async def run_conversation_loop(
             tool_name = tool_call.function.name
             arguments = tool_call.function.arguments or "{}"
 
+
             if tool_name == READ_FILE_FUNCTION:
                 payload = read_local_file(arguments)
                 if payload.get("success"):
                     tracker.record_local_read(payload.get("path", ""))
+            elif tool_name == "list_mcp_resources":
+                payload = await list_mcp_resources(session)
+            elif tool_name == "read_mcp_resource":
+                payload = await read_mcp_resource(session, arguments)
             else:
                 payload, structured = await call_mcp_tool(session, tool_name, arguments)
                 structured_data = structured or _extract_structured_from_payload(payload)
@@ -260,8 +342,11 @@ async def run_conversation_loop(
                     tracker.record_submit(structured_data)
                 elif tool_name == "get_job_status":
                     tracker.record_status(structured_data)
+                elif tool_name == "delete_job":
+                    tracker.record_deletion(structured_data)
                 elif tool_name.startswith("get_job_resource") or tool_name.startswith("read_resource"):
                     tracker.record_resource(structured_data)
+
 
             messages.append(
                 {
@@ -301,6 +386,10 @@ async def poll_until_complete(
 
         if tracker.job_completed and tracker.stdout_reported and tracker.stderr_reported:
             return
+        
+        if tracker.deleted:
+            print("Job was deleted explicitly.")
+            return
 
     print(
         f"Polling limit reached without collecting both stdout/stderr. "
@@ -320,6 +409,33 @@ async def main_async() -> None:
         env=os.environ.copy(),
     )
 
+    # Demo prompts
+    prompts = {
+        "simple": args.prompt,
+        "lifecycle": (
+            "Submit a PBS job using the following script: ./examples/hello_world_script.sh. "
+            "REQUIRED: You MUST specify 'home' for the 'filesystems' parameter. "
+            "Then, immediately hold the job, check that its state is 'H' (Held), "
+            " wait five seconds "
+            "then release the job, and check that its state is 'Q' or 'R'. "
+            "Finally, delete the job."
+        ),
+        "admin": (
+            "List all nodes and report how many are 'free'. "
+            "Then list all queues and report which ones are enabled."
+        ),
+        "resources": (
+            "List all available MCP resources. "
+            "Then read the 'pbs://system/status' resource to get a system overview. "
+            "Finally, read 'pbs://user/jobs' to see my current jobs."
+        ),
+    }
+
+    selected_prompt = prompts.get(args.demo, args.prompt)
+    if args.demo != "simple":
+        print(f"--- Running Demo: {args.demo} ---")
+        print(f"Prompt: {selected_prompt}\n")
+
     tracker = JobTracker()
 
     async with stdio_client(server) as (read_stream, write_stream):
@@ -328,6 +444,8 @@ async def main_async() -> None:
             registered_tools = await session.list_tools()
             openai_tools = [tool_to_openai_schema(tool) for tool in registered_tools.tools]
             openai_tools.append(local_read_tool_schema())
+            openai_tools.append(list_resources_tool_schema())
+            openai_tools.append(read_resource_tool_schema())
 
             if not openai_tools:
                 raise RuntimeError("The MCP server did not expose any tools.")
@@ -341,7 +459,7 @@ async def main_async() -> None:
                         "Call tools whenever you need live scheduler data, and report final results clearly."
                     ),
                 },
-                {"role": "user", "content": args.prompt},
+                {"role": "user", "content": selected_prompt},
             ]
 
             final_message = await run_conversation_loop(
@@ -354,7 +472,7 @@ async def main_async() -> None:
             )
             print(final_message)
 
-            if not tracker.job_id:
+            if not tracker.job_id or tracker.deleted:
                 return
 
             await poll_until_complete(
