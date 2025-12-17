@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import logging
 import os
 import sys
 from dataclasses import dataclass
@@ -132,6 +133,11 @@ def parse_args() -> argparse.Namespace:
         choices=["simple", "lifecycle", "admin", "resources"],
         default="simple",
         help="Select a pre-canned demo scenario.",
+    )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Enable debug logging output.",
     )
     return parser.parse_args()
 
@@ -305,11 +311,11 @@ async def run_conversation_loop(
     """Iteratively call OpenAI until there are no outstanding tool calls."""
 
     while True:
-        print(f"\n[DEBUG] Sending to LLM (History: {len(messages)} messages). Last message:")
+        logging.debug(f"Sending to LLM (History: {len(messages)} messages). Last message:")
         if messages:
             last_msg = messages[-1]
-            print(f"Role: {last_msg.get('role')}")
-            print(f"Content: {last_msg.get('content')}")
+            logging.debug(f"Role: {last_msg.get('role')}")
+            logging.debug(f"Content: {last_msg.get('content')}")
 
         response = client.chat.completions.create(
             model=model,
@@ -317,12 +323,12 @@ async def run_conversation_loop(
             tools=tools,
         )
         message = response.choices[0].message
-        print("\n[DEBUG] LLM Response:")
+        logging.debug("LLM Response:")
         if message.content:
-            print(f"Content: {message.content}")
+            logging.debug(f"Content: {message.content}")
         if message.tool_calls:
             for tc in message.tool_calls:
-                print(f"Tool Call: {tc.function.name} args={tc.function.arguments}")
+                logging.debug(f"Tool Call: {tc.function.name} args={tc.function.arguments}")
 
         assistant_entry: Dict[str, Any] = {"role": "assistant", "content": message.content or ""}
         if message.tool_calls:
@@ -395,16 +401,16 @@ async def poll_until_complete(
         messages.append({"role": "user", "content": followup_prompt})
 
         final_message = await run_conversation_loop(client, session, messages, tools, tracker, model)
-        print(final_message)
+        logging.info(final_message)
 
         if tracker.job_completed and tracker.stdout_reported and tracker.stderr_reported:
             return
         
         if tracker.deleted:
-            print("Job was deleted explicitly.")
+            logging.info("Job was deleted explicitly.")
             return
 
-    print(
+    logging.warning(
         f"Polling limit reached without collecting both stdout/stderr. "
         f"Job state: {tracker.state or 'unknown'}."
     )
@@ -444,10 +450,15 @@ async def main_async() -> None:
         ),
     }
 
+    logging.basicConfig(
+        level=logging.DEBUG if args.debug else logging.INFO,
+        format="[%(levelname)s] %(message)s",
+    )
+
     selected_prompt = prompts.get(args.demo, args.prompt)
     if args.demo != "simple":
-        print(f"--- Running Demo: {args.demo} ---")
-        print(f"Prompt: {selected_prompt}\n")
+        logging.info(f"--- Running Demo: {args.demo} ---")
+        logging.info(f"Prompt: {selected_prompt}\n")
 
     tracker = JobTracker()
 
@@ -483,7 +494,7 @@ async def main_async() -> None:
                 tracker=tracker,
                 model=args.model,
             )
-            print(final_message)
+            logging.info(final_message)
 
             if not tracker.job_id or tracker.deleted:
                 return
