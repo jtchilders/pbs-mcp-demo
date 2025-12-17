@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "pbs": {
+      "command": "python",
+      "args": ["-m", "pbs_mcp.server"],
+      "env": {
+        "PBS_SERVER": "aurora-pbs-0001",
+        "PBS_ACCOUNT": "datascience"
+      }
+    }
+  }
+}
