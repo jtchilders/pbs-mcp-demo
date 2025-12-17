@@ -1,4 +1,4 @@
 mcp>=1.0.0
 # Add the relative path to your PBS API once packaged, for example:
-# -e ../pbs-python-api
+-e ./external/pbs-python-api
 python-dotenv

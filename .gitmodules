@@ -1,0 +1,3 @@
+[submodule "external/pbs-python-api"]
+	path = external/pbs-python-api
+	url = https://github.com/jtchilders/pbs-python-api.git
