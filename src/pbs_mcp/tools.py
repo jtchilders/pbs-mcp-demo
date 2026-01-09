@@ -1,6 +1,7 @@
 """Tool declarations for the PBS MCP server."""
 from __future__ import annotations
 
+import textwrap
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -329,3 +330,224 @@ def register_tools(server: FastMCP) -> None:
             )
 
         return _success_response({"nodes": data, "filter": state_filter})
+
+    @server.tool()
+    def generate_aurora_pytorch_script(
+        script_name: str,
+        num_nodes: int = 1,
+        walltime: str = "01:00:00",
+        queue: str = "debug",
+        account: str = "",
+        python_script: str = "train.py",
+        conda_env: str = "",
+        filesystems: str = "home:flare",
+        ranks_per_node: int = 12,
+        output_dir: str = ".",
+    ) -> Dict[str, Any]:
+        """Generate a PBS submit script for distributed PyTorch training on Aurora.
+
+        Creates a ready-to-submit PBS script configured for Intel GPUs with:
+        - Proper module loading (frameworks)
+        - GPU affinity setup via ZE_AFFINITY_MASK
+        - oneCCL configuration for distributed training
+        - mpiexec launch with correct binding
+
+        Args:
+            script_name: Name for the generated PBS script (e.g., "train_job.sh")
+            num_nodes: Number of Aurora nodes (each has 6 Intel GPUs with 2 tiles = 12 devices)
+            walltime: Job walltime in HH:MM:SS format
+            queue: PBS queue (debug, prod, prod-large)
+            account: Project allocation name (uses PBS_ACCOUNT env var if empty)
+            python_script: Path to your PyTorch training script
+            conda_env: Optional conda environment to activate
+            filesystems: Filesystems to mount (e.g., "home:flare", "home:eagle")
+            ranks_per_node: MPI ranks per node (default 12 = 1 per GPU tile)
+            output_dir: Directory to write the generated script
+        """
+        context = load_pbs_context()
+        resolved_account = account or context.account
+
+        if num_nodes <= 0:
+            return _error_response(ValueError("num_nodes must be positive"))
+        if ranks_per_node <= 0 or ranks_per_node > 12:
+            return _error_response(ValueError("ranks_per_node must be between 1 and 12"))
+
+        total_ranks = num_nodes * ranks_per_node
+
+        # Conda activation if specified
+        conda_block = ""
+        if conda_env:
+            conda_block = f"""
+# Activate conda environment
+conda activate {conda_env}
+"""
+
+        script_content = f'''#!/bin/bash
+#PBS -A {resolved_account}
+#PBS -l select={num_nodes}
+#PBS -l walltime={walltime}
+#PBS -l filesystems={filesystems}
+#PBS -q {queue}
+#PBS -N pytorch_distributed
+#PBS -j oe
+#PBS -k doe
+
+# Change to submission directory
+cd ${{PBS_O_WORKDIR}}
+
+# Load PyTorch environment
+module load frameworks
+{conda_block}
+# Intel GPU and CCL configuration
+export ZE_FLAT_DEVICE_HIERARCHY=COMPOSITE
+
+# CCL settings for optimal distributed performance
+export CCL_PROCESS_LAUNCHER=pmix
+export CCL_ATL_TRANSPORT=mpi
+
+# Horovod thread affinity (for 12 ranks per node)
+export HOROVOD_THREAD_AFFINITY="4,8,12,16,20,24,56,60,64,68,72,76"
+
+# GPU affinity helper script
+cat > /tmp/gpu_affinity_${{PBS_JOBID}}.sh << 'AFFINITY_EOF'
+#!/bin/bash
+num_tiles_per_gpu=$1
+shift
+gpu_id=$(( PALS_LOCAL_RANKID / num_tiles_per_gpu ))
+export ZE_AFFINITY_MASK=$gpu_id
+exec "$@"
+AFFINITY_EOF
+chmod +x /tmp/gpu_affinity_${{PBS_JOBID}}.sh
+
+echo "Running distributed PyTorch on {num_nodes} nodes with {total_ranks} total ranks"
+echo "Start time: $(date)"
+
+# Launch distributed training
+# 2 tiles per GPU, so divide ranks_per_node by 2 to get tiles_per_gpu for affinity
+mpiexec -n {total_ranks} -ppn {ranks_per_node} \\
+    --pmi=pmix \\
+    /tmp/gpu_affinity_${{PBS_JOBID}}.sh 2 \\
+    python {python_script}
+
+echo "End time: $(date)"
+rm -f /tmp/gpu_affinity_${{PBS_JOBID}}.sh
+'''
+
+        # Write the script
+        output_path = Path(output_dir).expanduser() / script_name
+        try:
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_text(script_content)
+            output_path.chmod(0o755)
+        except OSError as error:
+            return _error_response(error)
+
+        return _success_response({
+            "script_path": str(output_path.absolute()),
+            "script_name": script_name,
+            "num_nodes": num_nodes,
+            "total_ranks": total_ranks,
+            "ranks_per_node": ranks_per_node,
+            "queue": queue,
+            "walltime": walltime,
+            "python_script": python_script,
+            "message": f"Generated PBS script at {output_path.absolute()}. Submit with: qsub {script_name}",
+        })
+
+    @server.tool()
+    def generate_aurora_mpi_script(
+        script_name: str,
+        num_nodes: int = 1,
+        walltime: str = "01:00:00",
+        queue: str = "debug",
+        account: str = "",
+        executable: str = "./a.out",
+        filesystems: str = "home:flare",
+        ranks_per_node: int = 12,
+        use_gpu: bool = True,
+        output_dir: str = ".",
+    ) -> Dict[str, Any]:
+        """Generate a PBS submit script for MPI applications on Aurora.
+
+        Creates a ready-to-submit PBS script for general MPI workloads.
+
+        Args:
+            script_name: Name for the generated PBS script
+            num_nodes: Number of Aurora nodes
+            walltime: Job walltime in HH:MM:SS format
+            queue: PBS queue (debug, prod, prod-large)
+            account: Project allocation name
+            executable: Path to your MPI executable
+            filesystems: Filesystems to mount
+            ranks_per_node: MPI ranks per node
+            use_gpu: Whether to set up GPU affinity
+            output_dir: Directory to write the generated script
+        """
+        context = load_pbs_context()
+        resolved_account = account or context.account
+
+        if num_nodes <= 0:
+            return _error_response(ValueError("num_nodes must be positive"))
+
+        total_ranks = num_nodes * ranks_per_node
+
+        gpu_setup = ""
+        affinity_wrapper = ""
+        cleanup = ""
+        if use_gpu:
+            gpu_setup = """
+# Intel GPU configuration
+export ZE_FLAT_DEVICE_HIERARCHY=COMPOSITE
+
+# GPU affinity helper
+cat > /tmp/gpu_affinity_${PBS_JOBID}.sh << 'AFFINITY_EOF'
+#!/bin/bash
+gpu_id=$(( PALS_LOCAL_RANKID / 2 ))
+export ZE_AFFINITY_MASK=$gpu_id
+exec "$@"
+AFFINITY_EOF
+chmod +x /tmp/gpu_affinity_${PBS_JOBID}.sh
+"""
+            affinity_wrapper = "/tmp/gpu_affinity_${PBS_JOBID}.sh "
+            cleanup = "rm -f /tmp/gpu_affinity_${PBS_JOBID}.sh\n"
+
+        script_content = f'''#!/bin/bash
+#PBS -A {resolved_account}
+#PBS -l select={num_nodes}
+#PBS -l walltime={walltime}
+#PBS -l filesystems={filesystems}
+#PBS -q {queue}
+#PBS -N mpi_job
+#PBS -j oe
+#PBS -k doe
+
+cd ${{PBS_O_WORKDIR}}
+{gpu_setup}
+echo "Running MPI job on {num_nodes} nodes with {total_ranks} ranks"
+echo "Start time: $(date)"
+
+mpiexec -n {total_ranks} -ppn {ranks_per_node} --pmi=pmix {affinity_wrapper}{executable}
+
+echo "End time: $(date)"
+{cleanup}'''
+
+        output_path = Path(output_dir).expanduser() / script_name
+        try:
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_text(script_content)
+            output_path.chmod(0o755)
+        except OSError as error:
+            return _error_response(error)
+
+        return _success_response({
+            "script_path": str(output_path.absolute()),
+            "script_name": script_name,
+            "num_nodes": num_nodes,
+            "total_ranks": total_ranks,
+            "ranks_per_node": ranks_per_node,
+            "queue": queue,
+            "walltime": walltime,
+            "executable": executable,
+            "use_gpu": use_gpu,
+            "message": f"Generated PBS script at {output_path.absolute()}. Submit with: qsub {script_name}",
+        })

@@ -208,3 +208,7 @@ __marimo__/
 
 # Temporary output files
 tmp_*.txt
+
+# PBS job output files
+*.o[0-9]*
+*.e[0-9]*

@@ -130,7 +130,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--demo",
-        choices=["simple", "lifecycle", "admin", "resources"],
+        choices=["simple", "lifecycle", "admin", "resources", "aurora-training", "script-gen"],
         default="simple",
         help="Select a pre-canned demo scenario.",
     )
@@ -264,8 +264,6 @@ def _extract_structured_from_payload(payload: Dict[str, Any]) -> Optional[Dict[s
                 continue
             if isinstance(data, dict):
                 return data
-    return None
-
     return None
 
 
@@ -447,6 +445,26 @@ async def main_async() -> None:
             "List all available MCP resources. "
             "Then read the 'pbs://system/status' resource to get a system overview. "
             "Finally, read 'pbs://user/jobs' to see my current jobs."
+        ),
+        "aurora-training": (
+            "I need to run distributed PyTorch training on Aurora. Please help me:\n"
+            "1. First, use the generate_aurora_pytorch_script tool to create a PBS submit script for "
+            "   2 nodes with 1 hour walltime on the debug queue. The Python training script is "
+            "   './examples/train_resnet_aurora.py'.\n"
+            "2. Show me the generated script path and explain what it sets up.\n"
+            "3. Then submit the job using submit_job with the generated script.\n"
+            "4. Monitor the job status and report when it starts running.\n"
+            "5. When complete, read and summarize the stdout to show training results."
+        ),
+        "script-gen": (
+            "I want to run an MPI application on Aurora. Use the generate_aurora_mpi_script tool to create "
+            "a PBS submit script with the following configuration:\n"
+            "- 4 nodes\n"
+            "- 30 minute walltime\n"
+            "- prod queue\n"
+            "- executable: ./my_simulation\n"
+            "- GPU-enabled\n"
+            "Show me the generated script and explain the GPU affinity setup."
         ),
     }
 
